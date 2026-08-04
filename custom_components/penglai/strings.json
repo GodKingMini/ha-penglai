@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "蓬莱 (Penglai) 连接配置",
+        "description": "配置蓬莱 MQTT 连接。默认 broker: {default_broker}。请填写蓬莱平台分配的设备凭据。",
+        "data": {
+          "broker_url": "Broker 地址",
+          "username": "用户名",
+          "password": "密码",
+          "device_id": "设备 ID",
+          "topic_prefix": "Topic 前缀",
+          "ping_interval": "心跳间隔（秒）",
+          "ping_max_lost": "心跳最大丢失次数"
+        }
+      }
+    },
+    "error": {
+      "invalid_url": "Broker 地址必须以 wss://、ws://、mqtt:// 或 tcp:// 开头"
+    }
+  }
+}

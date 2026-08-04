@@ -1,0 +1,12 @@
+{
+  "domain": "penglai",
+  "name": "Penglai (蓬莱)",
+  "codeowners": ["@GodKingMini"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/GodKingMini/ha-penglai",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/GodKingMini/ha-penglai/issues",
+  "requirements": ["paho-mqtt>=2.1.0"],
+  "version": "0.1.0"
+}
