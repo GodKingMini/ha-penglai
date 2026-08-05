@@ -26,6 +26,19 @@ APP_SOURCE_OPTIONS = {
 class HaierConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 2
 
+    async def async_step_import(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Handle import flow (蓬莱平台免交互创建 config entry).
+
+        HA 基类 ConfigFlow 没有 async_step_import，SOURCE_IMPORT 时若缺该方法
+        会直接抛 "Handler doesn't support step import"。平台只下发核心三字段，
+        补默认值后复用 async_step_user 的验证 + 建 entry 逻辑。
+        """
+        if user_input is None:
+            return self.async_abort(reason="no_import_data")
+        user_input.setdefault("default_load_all_entity", True)
+        user_input.setdefault("ignore_device_offline", False)
+        return await self.async_step_user(user_input)
+
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         errors: Dict[str, str] = {}
         if user_input is not None:

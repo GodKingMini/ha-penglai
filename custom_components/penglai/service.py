@@ -107,18 +107,16 @@ class PenglaiCommandService:
     async def _async_ensure_haier_installed(self) -> dict:
         """确保 haier 集成已安装到 custom_components。
 
-        内置 vendor/ 优先；若 HA 侧已有 haier（如用户手动装过）则跳过。
-        返回: {"installed": bool, "source": "vendor"|"existing"|"error"}
+        内置 vendor/ 始终覆盖安装（dirs_exist_ok），保证旧版（缺
+        async_step_import 修复）被替换；随后清除 loader 缓存使新文件生效。
+        返回: {"installed": bool, "source": "vendor"|"error"}
         """
-        if HAIER_INSTALL_DIR.joinpath("manifest.json").exists():
-            return {"installed": True, "source": "existing"}
-
         if not HAIER_VENDOR_DIR.exists():
             return {"installed": False, "source": "error", "error": "内置 vendor/haier 缺失"}
 
         try:
-            shutil.copytree(HAIER_VENDOR_DIR, HAIER_INSTALL_DIR)
-            _LOGGER.info("haier 集成已从 vendor 安装到 %s", HAIER_INSTALL_DIR)
+            shutil.copytree(HAIER_VENDOR_DIR, HAIER_INSTALL_DIR, dirs_exist_ok=True)
+            _LOGGER.info("haier 集成已从 vendor 安装/更新到 %s", HAIER_INSTALL_DIR)
             # 清除 HA loader 对 custom_components 的缓存，否则 async_init 找不到新装的集成
             self._hass.data.pop("custom_components", None)
             return {"installed": True, "source": "vendor"}
@@ -160,7 +158,7 @@ class PenglaiCommandService:
 
         # 3. import flow 免交互创建 entry
         #    配置流字段: client_id / refresh_token / app_source / default_load_all_entity / ignore_device_offline
-        #    haier 无自定义 async_step_import → 基类委托 async_step_user → 用 refresh_token 验证并建 entry
+        #    vendor/haier config_flow 提供 async_step_import（补默认值后转发 async_step_user）→ 免交互建 entry
         try:
             result = await self._hass.config_entries.flow.async_init(
                 HAIER_DOMAIN,
