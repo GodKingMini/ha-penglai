@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import ssl
+import time
 from typing import Any, Callable
 
 import paho.mqtt.client as mqtt
@@ -144,7 +145,7 @@ class PenglaiMqtt:
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):
         if reason_code == 0:
             self._connected = True
-            self._last_receive_time = asyncio.get_event_loop().time()
+            self._last_receive_time = time.monotonic()
             _LOGGER.info("Penglai MQTT 已连接: %s", self._broker_url)
             # 订阅指令 topic（借鉴 bemfa: 订阅自身 topic）
             client.subscribe(self._topic_cmd, qos=1)
@@ -158,7 +159,7 @@ class PenglaiMqtt:
         _LOGGER.warning("Penglai MQTT 断开 rc=%s", reason_code)
 
     def _on_message(self, client, userdata, msg):
-        self._last_receive_time = asyncio.get_event_loop().time()
+        self._last_receive_time = time.monotonic()
         self._lost_ping_count = 0
         try:
             payload = json.loads(msg.payload.decode())
@@ -183,7 +184,7 @@ class PenglaiMqtt:
             await asyncio.sleep(INTERVAL_PING_RECEIVE)
             if not self._connected:
                 continue
-            now = asyncio.get_event_loop().time()
+            now = time.monotonic()
             if self._last_receive_time is None:
                 self._last_receive_time = now
                 continue
