@@ -2,7 +2,22 @@
   "config": {
     "step": {
       "user": {
-        "title": "蓬莱 连接配置",
+        "title": "蓬莱 连接方式",
+        "description": "选择绑定方式。推荐「一键绑定」：只需设备绑定密钥，自动获取 MQTT 凭据。",
+        "data": {
+          "mode": "绑定方式"
+        }
+      },
+      "pairing": {
+        "title": "一键绑定",
+        "description": "在蓬莱管理后台为设备生成绑定密钥，粘贴到此处（32 位 hex，仅显示一次、用后作废）。默认 API 地址: {default_api}",
+        "data": {
+          "pairing_key": "设备绑定密钥",
+          "api_url": "蓬莱 API 地址"
+        }
+      },
+      "manual": {
+        "title": "手动配置",
         "description": "配置蓬莱 MQTT 连接。默认 broker: {default_broker}。请填写蓬莱平台分配的设备凭据。",
         "data": {
           "broker_url": "Broker 地址",
@@ -16,7 +31,10 @@
       }
     },
     "error": {
-      "invalid_url": "Broker 地址必须以 wss://、ws://、mqtt:// 或 tcp:// 开头"
+      "invalid_url": "Broker 地址必须以 wss://、ws://、mqtt:// 或 tcp:// 开头",
+      "invalid_key": "绑定密钥格式无效（需 32 位 hex）",
+      "api_unreachable": "无法连接蓬莱 API，请检查地址与网络",
+      "exchange_failed": "绑定密钥无效或已使用，请联系管理员重新生成"
     }
   }
 }

@@ -18,9 +18,14 @@ CONF_TOPIC_PREFIX = "topic_prefix"    # 默认 penglai
 CONF_PING_INTERVAL = "ping_interval"  # 心跳间隔秒, 默认 30
 CONF_PING_MAX_LOST = "ping_max_lost"  # 心跳丢失阈值, 默认 3
 
+# 一键绑定（设备绑定密钥）配置项
+CONF_PAIRING_KEY = "pairing_key"      # 设备绑定密钥（32 位 hex，仅绑定窗口内有效）
+CONF_API_URL = "api_url"              # 蓬莱后端 API 地址，默认 https://pl.cteaz.top
+
 DEFAULT_TOPIC_PREFIX = "penglai"
 DEFAULT_PING_INTERVAL = 30
 DEFAULT_PING_MAX_LOST = 3
+DEFAULT_API_URL = "https://pl.cteaz.top"
 
 # Topic 模板（借鉴 bemfa: 订阅自身 topic, 发布 {topic}/set）
 TOPIC_CMD = "{prefix}/{device_id}/cmd"        # 下行指令（蓬莱后端 → HA agent）
