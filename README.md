@@ -41,7 +41,7 @@
 
 1. 在 [Releases 页面](https://github.com/GodKingMini/ha-penglai/releases) 下载最新版 `ha_penglai.zip`
 2. 打开冬瓜伴侣（伴侣 UI），进入「文件管理」（或 SSH/终端）
-3. 将 zip 解压到 HA 的 `custom_components/` 目录，确保得到 `custom_components/penglai/` 结构：
+3. 将 zip 解压到 HA 的 `custom_components/` 目录，确保得到 `custom_components/penglai/` 结构（zip 顶层即 `penglai/`，解压后直接得到 `penglai/` 目录）：
 
 ```bash
 # 伴侣 UI 终端 / SSH 执行
