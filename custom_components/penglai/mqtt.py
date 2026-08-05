@@ -1,4 +1,4 @@
-"""MQTT 连接管理 for Penglai (蓬莱) 集成.
+"""MQTT 连接管理 for 蓬莱 集成.
 
 借鉴 bemfa 集成的 BemfaMqtt 结构：
 - 主动出站连接自建 EMQX broker（WSS 穿透 NAT）

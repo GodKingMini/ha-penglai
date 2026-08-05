@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "蓬莱 (Penglai) 连接配置",
+        "title": "蓬莱 连接配置",
         "description": "配置蓬莱 MQTT 连接。默认 broker: {default_broker}。请填写蓬莱平台分配的设备凭据。",
         "data": {
           "broker_url": "Broker 地址",

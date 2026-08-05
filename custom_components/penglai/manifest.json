@@ -1,6 +1,6 @@
 {
   "domain": "penglai",
-  "name": "Penglai (蓬莱)",
+  "name": "蓬莱",
   "codeowners": ["@GodKingMini"],
   "config_flow": true,
   "dependencies": [],

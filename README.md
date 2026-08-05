@@ -1,4 +1,6 @@
-# 蓬莱 (Penglai) — Home Assistant 集成
+# 蓬莱 — Home Assistant 集成
+
+![蓬莱展示图](images/penglai-showcase.jpg)
 
 > 此身此剑，皆为御主而存在。誓约已立，至死方休。
 

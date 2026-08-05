@@ -1,4 +1,4 @@
-"""Penglai (蓬莱) 装配指令执行服务.
+"""蓬莱 装配指令执行服务.
 
 借鉴 bemfa 的服务模式：接收 MQTT 指令 → 调用 HA 服务 → 回报结果。
 蓬莱只做装配指令（低频配置型），控制类指令归巴法。
@@ -12,20 +12,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 from pathlib import Path
 from typing import Any
 
-from homeassistant.config_entries import SOURCE_IMPORT
+from homeassistant.config_entries import SOURCE_IMPORT, SOURCE_USER
 from homeassistant.core import HomeAssistant, ServiceCall
 
 from .const import (
     CMD_BIND_DEVICE,
+    CMD_CONVERT_LIGHTS,
     CMD_CREATE_AUTOMATION,
     CMD_LIST_STATES,
     CMD_LOGIN_HA,
     CMD_PING,
     CMD_REBOOT_INTEGRATION,
+    CMD_SCAN_LIGHTS,
     CMD_SET_SCENE,
     CMD_SETUP_HAIER,
     CMD_SYNC_STATUS,
@@ -86,6 +89,10 @@ class PenglaiCommandService:
                 result = await self._async_login_ha(params)
             elif cmd == CMD_SETUP_HAIER:
                 result = await self._async_setup_haier(params)
+            elif cmd == CMD_CONVERT_LIGHTS:
+                result = await self._async_convert_lights(params)
+            elif cmd == CMD_SCAN_LIGHTS:
+                result = await self._async_scan_lights(params)
             elif cmd == CMD_BIND_DEVICE:
                 result = await self._async_bind_device(params)
             elif cmd in CMD_TO_HA_SERVICE:
@@ -323,6 +330,185 @@ class PenglaiCommandService:
             return len(self._hass.data.get(HAIER_DOMAIN, {}).get("devices", []))
         except Exception:  # noqa: BLE001
             return 0
+
+    # ─────────────────────────────────────────────
+    # scan_lights：扫描海尔灯 switch 候选清单（v0.4）
+    # ─────────────────────────────────────────────
+
+    async def _async_scan_lights(self, params: dict) -> dict:
+        """扫描海尔灯相关 switch 实体，上报候选清单（供前端勾选精准转换）。
+
+        params: {
+            "keyword": str,   # 可选，过滤 friendly_name 包含关键字
+            "limit": int,     # 可选，返回上限（默认 200）
+        }
+        返回: {
+            "candidates": [{"entity_id","friendly_name","matched","already_light","state"}],
+            "total_switch": int,
+            "already_light": int,
+        }
+        候选 = 名称含灯关键字且未被排除词的 switch（同 convert_lights 规则），
+        无论后缀是否命中都上报，便于前端看到全部可转换面板灯。
+        """
+        keyword = (params or {}).get("keyword", "")
+        limit = int((params or {}).get("limit", 200) or 200)
+
+        # 已有 light.source_entity 集合（Switch as X 已转）
+        existing_sources = set()
+        for s in self._hass.states.async_all():
+            if s.entity_id.startswith("light."):
+                src = s.attributes.get("source_entity")
+                if src:
+                    existing_sources.add(src)
+
+        candidates = []
+        total_switch = 0
+        for s in self._hass.states.async_all():
+            eid = s.entity_id
+            if not eid.startswith("switch."):
+                continue
+            total_switch += 1
+            fn = s.attributes.get("friendly_name", "")
+            if not fn:
+                continue
+            if any(k in fn for k in self._LIGHT_EXCLUDE_KEYWORDS):
+                continue
+            # 灯判定：关键词命中 或 以「灯」结尾且非状态/开关类
+            is_light = any(k in fn for k in self._LIGHT_NAME_KEYWORDS) or (
+                fn.endswith("灯") and not any(x in fn for x in ("指示", "状态", "开关"))
+            )
+            if not is_light:
+                continue
+            suffix_hit = bool(self._LIGHT_SWITCH_SUFFIX_RE.search(eid))
+            if keyword and keyword not in fn:
+                continue
+            candidates.append({
+                "entity_id": eid,
+                "friendly_name": fn,
+                "matched": is_light,
+                "suffix_hit": suffix_hit,
+                "already_light": eid in existing_sources,
+                "state": s.state,
+            })
+            if len(candidates) >= limit:
+                break
+
+        return {
+            "candidates": candidates,
+            "total_switch": total_switch,
+            "already_light": sum(1 for c in candidates if c["already_light"]),
+        }
+
+    # ─────────────────────────────────────────────
+    # convert_lights：海尔灯 switch→light（v0.3 / v0.4 支持精准列表）
+    # ─────────────────────────────────────────────
+
+    # 海尔面板灯 switch 状态后缀（英文旧面板 / 拼音集成，均可带 _N 去重）
+    _LIGHT_SWITCH_SUFFIX_RE = re.compile(
+        r"_(alwaysonstatus|onoffstatus|tong_duan_dian_zhuang_tai|kai_guan_ji_zhuang_tai)(_\d+)?$"
+    )
+    # 灯具名称关键词（02_convert_lights.py 规则）
+    _LIGHT_NAME_KEYWORDS = [
+        "灯带", "射灯", "主灯", "镜灯", "柜灯", "衣帽间灯", "淋浴射灯",
+        "过道射灯", "玄关灯", "儿童房灯", "餐厅主灯", "厨房灯带", "厨房射灯",
+        "背景灯带", "阳台灯", "凉霸照明",
+    ]
+    # 排除词
+    _LIGHT_EXCLUDE_KEYWORDS = [
+        "指示灯", "反转", "通断电", "场景", "空调", "地暖", "新风", "网关",
+        "洗衣机", "干衣机", "冰箱", "窗帘", "布帘", "纱帘", "启用",
+    ]
+
+    async def _async_convert_lights(self, params: dict) -> dict:
+        """海尔灯 switch → light（对应 ha_manager 02_convert_lights.py）。
+
+        params: {
+            "entity_ids": [str],  # 可选。指定要转换的 switch entity_id 列表（精准模式）
+                                 # 未提供时：自动发现全部海尔面板灯 switch（一键模式）
+        }
+        流程：
+        1. 发现海尔面板灯 switch（后缀 + 名称关键词 + 排除词）或按 entity_ids 精准选取
+        2. Switch as X config flow 转 light（防重复：已存在 source_entity 则跳过）
+        """
+        # ── 1. 确定目标 switch 列表 ──
+        entity_ids = (params or {}).get("entity_ids") or []
+
+        # 已有 light.source_entity 集合（Switch as X 已转）
+        existing_sources = set()
+        for s in self._hass.states.async_all():
+            if s.entity_id.startswith("light."):
+                src = s.attributes.get("source_entity")
+                if src:
+                    existing_sources.add(src)
+
+        targets = []
+        if entity_ids:
+            # 精准模式：只处理指定列表（跳过已转的）
+            id_set = {e.strip() for e in entity_ids if isinstance(e, str) and e.strip()}
+            for s in self._hass.states.async_all():
+                eid = s.entity_id
+                if eid not in id_set:
+                    continue
+                fn = s.attributes.get("friendly_name", "") or eid
+                targets.append({"entity_id": eid, "friendly_name": fn})
+        else:
+            # 一键模式：自动发现（后缀 + 名称关键词 + 排除词）
+            for s in self._hass.states.async_all():
+                eid = s.entity_id
+                if not eid.startswith("switch."):
+                    continue
+                if not self._LIGHT_SWITCH_SUFFIX_RE.search(eid):
+                    continue
+                fn = s.attributes.get("friendly_name", "")
+                if not fn:
+                    continue
+                if any(k in fn for k in self._LIGHT_EXCLUDE_KEYWORDS):
+                    continue
+                is_light = any(k in fn for k in self._LIGHT_NAME_KEYWORDS) or (
+                    fn.endswith("灯") and not any(x in fn for x in ("指示", "状态", "开关"))
+                )
+                if not is_light:
+                    continue
+                targets.append({"entity_id": eid, "friendly_name": fn})
+
+        # ── 2. Switch as X 转 light ──
+        converted, skipped, failed = [], [], []
+        for t in targets:
+            eid = t["entity_id"]
+            if eid in existing_sources:
+                skipped.append({**t, "reason": "已存在 light"})
+                continue
+            try:
+                flow = await self._hass.config_entries.flow.async_init(
+                    "switch_as_x",
+                    context={"source": SOURCE_USER},
+                    data={"entity_id": eid},
+                )
+                if flow.get("type") == "form":
+                    step = await self._hass.config_entries.flow.async_configure(
+                        flow["flow_id"],
+                        {"target_domain": "light", "invert": False},
+                    )
+                else:
+                    step = flow
+                if step.get("type") == "create_entry":
+                    converted.append({**t, "entity_id": step["result"].entity_id})
+                elif step.get("type") == "abort":
+                    skipped.append({**t, "reason": step.get("reason", "abort")})
+                else:
+                    failed.append({**t, "reason": f"flow type={step.get('type')}"})
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.exception("Switch as X 转换失败: %s", eid)
+                failed.append({**t, "reason": str(err)})
+
+        return {
+            "mode": "precise" if entity_ids else "auto",
+            "requested": len(entity_ids) if entity_ids else len(targets),
+            "discovered": len(targets),
+            "converted": converted,
+            "skipped": skipped,
+            "failed": failed,
+        }
 
     # ─────────────────────────────────────────────
     # 原有 handler

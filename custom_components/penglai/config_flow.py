@@ -1,4 +1,4 @@
-"""Config flow for Penglai (蓬莱) 集成.
+"""Config flow for 蓬莱 集成.
 
 借鉴 bemfa config flow：让用户在 HA「添加集成」界面独立配置：
 - broker 地址（默认 wss://pl.cteaz.top/mqtt）
