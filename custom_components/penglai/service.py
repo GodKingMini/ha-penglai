@@ -27,6 +27,7 @@ from .const import (
     CMD_PING,
     CMD_REBOOT_INTEGRATION,
     CMD_SET_SCENE,
+    CMD_SETUP_HAIER,
     CMD_SYNC_STATUS,
     DOMAIN,
     RESULT_FAIL,
@@ -83,6 +84,8 @@ class PenglaiCommandService:
                 result = await self._async_sync_status()
             elif cmd == CMD_LOGIN_HA:
                 result = await self._async_login_ha(params)
+            elif cmd == CMD_SETUP_HAIER:
+                result = await self._async_setup_haier(params)
             elif cmd == CMD_BIND_DEVICE:
                 result = await self._async_bind_device(params)
             elif cmd in CMD_TO_HA_SERVICE:
@@ -213,6 +216,105 @@ class PenglaiCommandService:
             "title": entry.title,
             "reloaded": reloaded,
             "device_count": self._async_haier_device_count(),
+        }
+
+    async def _async_setup_haier(self, params: dict) -> dict:
+        """一键装配海尔：删除旧 entry（修复坏 token）→ import 重建 → 等待设备加载完成。
+
+        合并原 login_ha + bind_device 的职责，单条指令完成海尔集成创建与验证：
+        1. 确保 haier 集成已安装（vendor 最新，含 async_step_import 修复）
+        2. 删除所有现有 haier config entry —— 旧 entry 的 token/refresh_token 若已
+           失效或 app_source 与签发 appId 不匹配（如 "Token不是由此应用创建"），
+           删除重建即彻底规避；幂等可重复执行
+        3. 经 import flow 用平台新下发的 refresh_token 创建 entry
+        4. 轮询等待 async_setup_entry 拉取设备，返回 device_count 作为绑定验证
+
+        params: {
+            "refresh_token": str,
+            "client_id": str,     # 签发 token 的 appId，如 MB-UZHSH-0001
+            "app_source": str,    # app / wxapp
+        }
+        """
+        refresh_token = (params or {}).get("refresh_token", "")
+        client_id = (params or {}).get("client_id", "")
+        app_source = (params or {}).get("app_source", "app")
+
+        if not refresh_token or not client_id:
+            return {"error": "缺少 refresh_token 或 client_id"}
+
+        # 1. 确保 haier 集成已安装（vendor 强制覆盖）
+        install = await self._async_ensure_haier_installed()
+        if not install.get("installed"):
+            return {"error": f"haier 集成安装失败: {install.get('error', '未知')}"}
+
+        # 2. 删除旧 haier entry（幂等重建）
+        removed = []
+        for entry in self._hass.config_entries.async_entries(HAIER_DOMAIN):
+            try:
+                await self._hass.config_entries.async_remove(entry.entry_id)
+                removed.append(entry.entry_id)
+                _LOGGER.info("haier 旧 entry 已删除: %s (%s)", entry.title, entry.entry_id)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("haier 旧 entry 删除失败 %s: %s", entry.entry_id, err)
+        if removed:
+            # 卸载后清残留数据，避免新 entry setup 读到旧 devices
+            self._hass.data.pop(HAIER_DOMAIN, None)
+
+        # 3. import flow 免交互创建 entry
+        try:
+            result = await self._hass.config_entries.flow.async_init(
+                HAIER_DOMAIN,
+                context={"source": SOURCE_IMPORT},
+                data={
+                    "client_id": client_id,
+                    "refresh_token": refresh_token,
+                    "app_source": app_source,
+                    "default_load_all_entity": True,
+                    "ignore_device_offline": False,
+                },
+            )
+            _LOGGER.info("haier import flow result: %s", result)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("haier import flow 失败")
+            return {"error": f"haier import flow 失败: {err}"}
+
+        if result.get("type") == "abort":
+            return {
+                "entry_aborted": True,
+                "removed_entries": removed,
+                "reason": result.get("reason"),
+                "detail": result.get("description_placeholders"),
+            }
+        if result.get("type") != "create_entry":
+            return {
+                "flow_in_progress": True,
+                "removed_entries": removed,
+                "step": result.get("step_id"),
+                "result_type": result.get("type"),
+            }
+
+        entry = result["result"]
+
+        # 4. 等待 async_setup_entry 异步拉取设备（最多 30s）
+        device_count = 0
+        for _ in range(60):
+            try:
+                haier_data = self._hass.data.get(HAIER_DOMAIN)
+                if haier_data and haier_data.get("devices"):
+                    device_count = len(haier_data["devices"])
+                    if device_count > 0:
+                        break
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(0.5)
+
+        return {
+            "entry_created": True,
+            "removed_entries": removed,
+            "entry_id": entry.entry_id,
+            "title": entry.title,
+            "device_count": device_count,
+            "setup_complete": device_count > 0,
         }
 
     def _async_haier_device_count(self) -> int:

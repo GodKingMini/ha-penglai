@@ -30,6 +30,7 @@ TOPIC_PING = "{prefix}/ping"                  # 心跳（借鉴 bemfa 的 hasspi
 
 # 指令类型（蓬莱装配指令）
 CMD_LOGIN_HA = "login_ha"
+CMD_SETUP_HAIER = "setup_haier"
 CMD_BIND_DEVICE = "bind_device"
 CMD_SET_SCENE = "set_scene"
 CMD_SYNC_STATUS = "sync_status"
