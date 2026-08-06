@@ -110,11 +110,19 @@ class PenglaiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def _exchange(self, pairing_key: str, api_url: str) -> dict[str, Any]:
-        """调用后端 POST /api/v1/pairing/exchange 换取凭据。"""
+        """调用后端 POST /api/v1/pairing/exchange 换取凭据。
+
+        附带本 HA 实例指纹（hass.config.uuid）——后端将其哈希绑定到设备，
+        后续心跳携带同一指纹做持续校验，异机冒用凭据即吊销。
+        """
         url = f"{api_url}/api/v1/pairing/exchange"
         timeout = aiohttp.ClientTimeout(total=15)
+        body = {"pairing_key": pairing_key}
+        fingerprint = self._hass_fingerprint()
+        if fingerprint:
+            body["fingerprint"] = fingerprint
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, json={"pairing_key": pairing_key}) as resp:
+            async with session.post(url, json=body) as resp:
                 if resp.status != 200:
                     raise ValueError(f"exchange http {resp.status}")
                 payload = await resp.json()
@@ -125,6 +133,17 @@ class PenglaiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if field not in data:
                 raise ValueError(f"exchange missing {field}")
         return data
+
+    def _hass_fingerprint(self) -> str | None:
+        """取 HA 实例唯一指纹：优先 hass.config.uuid，兜底读 core.uuid 文件。"""
+        uuid = getattr(getattr(self.hass, "config", None), "uuid", None)
+        if not uuid:
+            try:
+                import pathlib
+                uuid = pathlib.Path("/config/.storage/core.uuid").read_text().strip()
+            except (OSError, ValueError):
+                return None
+        return uuid or None
 
     def _create_from_exchange(self, data: dict[str, Any]) -> FlowResult:
         """把后端换发的凭据转换为 HA 配置条目。

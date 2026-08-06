@@ -23,6 +23,7 @@ from .const import (
     CONF_PING_MAX_LOST,
     CONF_TOPIC_PREFIX,
     CONF_USERNAME,
+    CMD_HEARTBEAT,
     CMD_PING,
     DEFAULT_PING_INTERVAL,
     DEFAULT_PING_MAX_LOST,
@@ -30,6 +31,7 @@ from .const import (
     RESULT_FAIL,
     RESULT_OK,
     TOPIC_CMD,
+    TOPIC_HEARTBEAT,
     TOPIC_PING,
     TOPIC_RESULT,
     TOPIC_STATE,
@@ -60,7 +62,8 @@ class PenglaiMqtt:
         self._topic_cmd = TOPIC_CMD.format(prefix=self._prefix, device_id=self._device_id)
         self._topic_result = TOPIC_RESULT.format(prefix=self._prefix, device_id=self._device_id)
         self._topic_state = TOPIC_STATE.format(prefix=self._prefix, device_id=self._device_id)
-        self._topic_ping = TOPIC_PING.format(prefix=self._prefix)
+        self._topic_ping = TOPIC_PING.format(prefix=self._prefix)  # 旧版兼容
+        self._topic_heartbeat = TOPIC_HEARTBEAT.format(prefix=self._prefix, device_id=self._device_id)
 
         self._client: mqtt.Client | None = None
         self._connected = False
@@ -149,8 +152,8 @@ class PenglaiMqtt:
             _LOGGER.info("Penglai MQTT 已连接: %s", self._broker_url)
             # 订阅指令 topic（借鉴 bemfa: 订阅自身 topic）
             client.subscribe(self._topic_cmd, qos=1)
-            # 上线发布心跳
-            self.publish(self._topic_ping, json.dumps({"type": CMD_PING, "device_id": self._device_id, "ts": _now()}))
+            # 上线发布心跳（带指纹，后端做指纹校验）
+            self.publish(self._topic_heartbeat, json.dumps({"type": CMD_HEARTBEAT, "device_id": self._device_id, "fingerprint": self._fingerprint(), "ts": _now()}))
         else:
             _LOGGER.error("Penglai MQTT 连接被拒 rc=%s", reason_code)
 
@@ -172,11 +175,11 @@ class PenglaiMqtt:
     # ---- 心跳（借鉴 bemfa: _ping_send_loop / _ping_check_loop）----
 
     async def _ping_send_loop(self) -> None:
-        """每 30s 发布心跳。"""
+        """每 30s 发布心跳（带指纹）。"""
         while True:
             await asyncio.sleep(INTERVAL_PING_SEND)
             if self._connected:
-                self.publish(self._topic_ping, json.dumps({"type": CMD_PING, "device_id": self._device_id, "ts": _now()}))
+                self.publish(self._topic_heartbeat, json.dumps({"type": CMD_HEARTBEAT, "device_id": self._device_id, "fingerprint": self._fingerprint(), "ts": _now()}))
 
     async def _ping_check_loop(self) -> None:
         """每 20s 检查心跳超时，连续 3 次丢失则重连。"""
@@ -222,6 +225,16 @@ class PenglaiMqtt:
     def set_cmd_handler(self, handler: Callable[[dict], None]) -> None:
         """设置指令处理回调。"""
         self._cmd_handler = handler
+
+    def _fingerprint(self) -> str:
+        """本 HA 实例指纹：hass.config.uuid（与 config_flow 上报一致）。"""
+        uuid = getattr(getattr(self._hass, "config", None), "uuid", None)
+        if not uuid:
+            try:
+                uuid = open("/config/.storage/core.uuid", encoding="utf-8").read().strip()
+            except (OSError, ValueError):
+                return ""
+        return uuid or ""
 
 
 def _now() -> float:

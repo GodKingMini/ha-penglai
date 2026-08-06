@@ -31,7 +31,8 @@ DEFAULT_API_URL = "https://pl.cteaz.top"
 TOPIC_CMD = "{prefix}/{device_id}/cmd"        # 下行指令（蓬莱后端 → HA agent）
 TOPIC_RESULT = "{prefix}/{device_id}/result"  # 上行结果（HA agent → 蓬莱后端）
 TOPIC_STATE = "{prefix}/{device_id}/state"    # 设备清单/状态上报（HA agent → 蓬莱后端）
-TOPIC_PING = "{prefix}/ping"                  # 心跳（借鉴 bemfa 的 hassping）
+TOPIC_PING = "{prefix}/ping"                  # 旧版心跳（兼容，不带指纹）
+TOPIC_HEARTBEAT = "{prefix}/{device_id}/heartbeat"  # 新版心跳（带指纹，后端订阅 penglai/+/heartbeat）
 
 # 指令类型（蓬莱装配指令）
 CMD_LOGIN_HA = "login_ha"
@@ -45,6 +46,7 @@ CMD_REBOOT_INTEGRATION = "reboot_integration"
 CMD_CREATE_AUTOMATION = "create_automation"
 CMD_LIST_STATES = "list_states"
 CMD_PING = "ping"
+CMD_HEARTBEAT = "heartbeat"
 
 # 结果状态
 RESULT_OK = "success"
