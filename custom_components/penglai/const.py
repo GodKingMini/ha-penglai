@@ -45,6 +45,7 @@ CMD_SYNC_STATUS = "sync_status"
 CMD_REBOOT_INTEGRATION = "reboot_integration"
 CMD_CREATE_AUTOMATION = "create_automation"
 CMD_LIST_STATES = "list_states"
+CMD_FETCH_DEVICES = "fetch_devices"
 CMD_PING = "ping"
 CMD_HEARTBEAT = "heartbeat"
 

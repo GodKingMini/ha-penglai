@@ -24,6 +24,7 @@ from .const import (
     CMD_BIND_DEVICE,
     CMD_CONVERT_LIGHTS,
     CMD_CREATE_AUTOMATION,
+    CMD_FETCH_DEVICES,
     CMD_LIST_STATES,
     CMD_LOGIN_HA,
     CMD_PING,
@@ -81,6 +82,8 @@ class PenglaiCommandService:
         try:
             if cmd == CMD_LIST_STATES:
                 result = await self._async_list_states(params)
+            elif cmd == CMD_FETCH_DEVICES:
+                result = await self._async_fetch_devices(params)
             elif cmd == CMD_CREATE_AUTOMATION:
                 result = await self._async_create_automation(params)
             elif cmd == CMD_SYNC_STATUS:
@@ -526,6 +529,56 @@ class PenglaiCommandService:
             for s in states
         ]
         return {"count": len(slim), "states": slim}
+
+    async def _async_fetch_devices(self, params: dict) -> dict:
+        """抓取 HA 内智能家居设备清单（实体 + 设备注册表 + 集成来源）。
+
+        智能家居域白名单（过滤 automation/script/zone 等非设备域），
+        从 entity registry 取集成来源、device registry 取设备名/厂商/型号。
+        返回: {"count", "devices": [{entity_id, name, domain, state, device_class,
+                                     unit, integration, device_name, manufacturer, model}]}
+        """
+        smart_domains = {
+            "light", "switch", "climate", "cover", "fan", "humidifier",
+            "media_player", "vacuum", "lock", "water_heater", "valve",
+            "binary_sensor", "sensor", "select", "number", "button",
+            "scene", "input_boolean", "input_number", "input_select",
+        }
+        ent_reg = self._hass.helpers.entity_registry.async_get(self._hass)
+        dev_reg = self._hass.helpers.device_registry.async_get(self._hass)
+
+        devices = []
+        for s in self._hass.states.async_all():
+            domain, _, entity_id = s.entity_id.partition(".")
+            if domain not in smart_domains:
+                continue
+
+            entry = ent_reg.async_get(s.entity_id) if ent_reg else None
+            integration = entry.platform if entry else ""
+            device_name = ""
+            manufacturer = ""
+            model = ""
+            if entry and entry.device_id and dev_reg:
+                dev = dev_reg.async_get(entry.device_id)
+                if dev:
+                    device_name = dev.name_by_user or dev.name or ""
+                    manufacturer = dev.manufacturer or ""
+                    model = dev.model or ""
+
+            devices.append({
+                "entity_id": s.entity_id,
+                "name": s.attributes.get("friendly_name") or entity_id,
+                "domain": domain,
+                "state": s.state,
+                "device_class": s.attributes.get("device_class"),
+                "unit": s.attributes.get("unit_of_measurement"),
+                "integration": integration,
+                "device_name": device_name,
+                "manufacturer": manufacturer,
+                "model": model,
+            })
+
+        return {"count": len(devices), "devices": devices}
 
     async def _async_sync_status(self) -> dict:
         """同步设备在线状态（回报给蓬莱后端）。"""
