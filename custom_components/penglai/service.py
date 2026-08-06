@@ -19,6 +19,7 @@ from typing import Any
 
 from homeassistant.config_entries import SOURCE_IMPORT, SOURCE_USER
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.helpers import device_registry, entity_registry
 
 from .const import (
     CMD_BIND_DEVICE,
@@ -544,8 +545,8 @@ class PenglaiCommandService:
             "binary_sensor", "sensor", "select", "number", "button",
             "scene", "input_boolean", "input_number", "input_select",
         }
-        ent_reg = self._hass.helpers.entity_registry.async_get(self._hass)
-        dev_reg = self._hass.helpers.device_registry.async_get(self._hass)
+        ent_reg = entity_registry.async_get(self._hass)
+        dev_reg = device_registry.async_get(self._hass)
 
         devices = []
         for s in self._hass.states.async_all():
