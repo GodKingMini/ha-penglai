@@ -419,8 +419,8 @@ class PenglaiCommandService:
     ]
     # 排除词
     _LIGHT_EXCLUDE_KEYWORDS = [
-        "指示灯", "反转", "通断电", "场景", "空调", "地暖", "新风", "网关",
-        "洗衣机", "干衣机", "冰箱", "窗帘", "布帘", "纱帘", "启用",
+        "指示灯", "反转", "场景", "空调", "地暖", "新风", "网关",
+        "洗衣机", "干衣机", "冰箱", "窗帘", "布帘", "纱帘", "启用", "双控",
     ]
 
     async def _async_convert_lights(self, params: dict) -> dict:
@@ -483,10 +483,16 @@ class PenglaiCommandService:
                 skipped.append({**t, "reason": "已存在 light"})
                 continue
             try:
+                # 关键：SchemaConfigFlowHandler 一步即建 entry（schema 含 target_domain），
+                # 必须 init 时就传全参数，否则 options 缺 target_domain → 实体 setup 失败。
                 flow = await self._hass.config_entries.flow.async_init(
                     "switch_as_x",
                     context={"source": SOURCE_USER},
-                    data={"entity_id": eid},
+                    data={
+                        "entity_id": eid,
+                        "target_domain": "light",
+                        "invert": False,
+                    },
                 )
                 if flow.get("type") == "form":
                     step = await self._hass.config_entries.flow.async_configure(
@@ -496,7 +502,20 @@ class PenglaiCommandService:
                 else:
                     step = flow
                 if step.get("type") == "create_entry":
-                    converted.append({**t, "entity_id": step["result"].entity_id})
+                    # ConfigEntry 无 entity_id 属性——实体异步生成，等待后按 source_entity 反查
+                    await self._hass.async_block_till_done()
+                    found = None
+                    for s in self._hass.states.async_all():
+                        if (
+                            s.entity_id.startswith("light.")
+                            and s.attributes.get("source_entity") == eid
+                        ):
+                            found = s.entity_id
+                            break
+                    if found:
+                        converted.append({**t, "entity_id": found})
+                    else:
+                        failed.append({**t, "reason": "entry 已创建但未发现 light 实体"})
                 elif step.get("type") == "abort":
                     skipped.append({**t, "reason": step.get("reason", "abort")})
                 else:
