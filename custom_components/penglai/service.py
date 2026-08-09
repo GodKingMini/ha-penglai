@@ -477,6 +477,7 @@ class PenglaiCommandService:
 
         # ── 2. Switch as X 转 light ──
         converted, skipped, failed = [], [], []
+        created_entries = []  # (t, eid) 已创建 entry，统一等待后反查
         for t in targets:
             eid = t["entity_id"]
             if eid in existing_sources:
@@ -502,20 +503,10 @@ class PenglaiCommandService:
                 else:
                     step = flow
                 if step.get("type") == "create_entry":
-                    # ConfigEntry 无 entity_id 属性——实体异步生成，等待后按 source_entity 反查
-                    await self._hass.async_block_till_done()
-                    found = None
-                    for s in self._hass.states.async_all():
-                        if (
-                            s.entity_id.startswith("light.")
-                            and s.attributes.get("source_entity") == eid
-                        ):
-                            found = s.entity_id
-                            break
-                    if found:
-                        converted.append({**t, "entity_id": found})
-                    else:
-                        failed.append({**t, "reason": "entry 已创建但未发现 light 实体"})
+                    # ConfigEntry 无 entity_id 属性——实体异步生成，
+                    # 批量创建完统一等待（一次 async_block_till_done 覆盖全部 entry），
+                    # 避免逐个等待时事件循环排空慢导致累计超时。
+                    created_entries.append((t, eid))
                 elif step.get("type") == "abort":
                     skipped.append({**t, "reason": step.get("reason", "abort")})
                 else:
@@ -523,6 +514,30 @@ class PenglaiCommandService:
             except Exception as err:  # noqa: BLE001
                 _LOGGER.exception("Switch as X 转换失败: %s", eid)
                 failed.append({**t, "reason": str(err)})
+
+        # ── 3. 统一等待事件循环排空（10s 上限，防实例同步设备多时长期阻塞）──
+        if created_entries:
+            try:
+                await asyncio.wait_for(
+                    self._hass.async_block_till_done(), timeout=10
+                )
+            except asyncio.TimeoutError:
+                _LOGGER.warning(
+                    "Switch as X 转换后等待事件循环排空超时(10s)，按当前状态反查实体"
+                )
+            for t, eid in created_entries:
+                found = None
+                for s in self._hass.states.async_all():
+                    if (
+                        s.entity_id.startswith("light.")
+                        and s.attributes.get("source_entity") == eid
+                    ):
+                        found = s.entity_id
+                        break
+                if found:
+                    converted.append({**t, "entity_id": found})
+                else:
+                    failed.append({**t, "reason": "entry 已创建但未发现 light 实体"})
 
         return {
             "mode": "precise" if entity_ids else "auto",
