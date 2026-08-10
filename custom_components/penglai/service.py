@@ -33,6 +33,7 @@ from .const import (
     CMD_SCAN_LIGHTS,
     CMD_SET_SCENE,
     CMD_SETUP_HAIER,
+    CMD_SYNC_BEMFA,
     CMD_SYNC_STATUS,
     DOMAIN,
     RESULT_FAIL,
@@ -95,6 +96,8 @@ class PenglaiCommandService:
                 result = await self._async_setup_haier(params)
             elif cmd == CMD_CONVERT_LIGHTS:
                 result = await self._async_convert_lights(params)
+            elif cmd == CMD_SYNC_BEMFA:
+                result = await self._async_sync_bemfa(params)
             elif cmd == CMD_SCAN_LIGHTS:
                 result = await self._async_scan_lights(params)
             elif cmd == CMD_BIND_DEVICE:
@@ -566,6 +569,110 @@ class PenglaiCommandService:
             "requested": len(entity_ids) if entity_ids else len(targets),
             "discovered": len(targets),
             "converted": converted,
+            "skipped": skipped,
+            "failed": failed,
+        }
+
+    async def _async_sync_bemfa(self, params: dict) -> dict:
+        """同步 Light 灯具到巴法集成（仅 light 域，topic 驱动）。
+
+        params: {
+            "uid": str,    # 可选。巴法 UID（32 位 hex）。bemfa 集成未登录时自动编程式登录
+            "limit": int,  # 可选。同步数量上限（默认全部 light）
+        }
+        流程：
+        1. 确保 bemfa 集成已登录（未登录且有 uid → config flow 自动建 entry）
+        2. 拉取巴法云端已有 topic（幂等去重）
+        3. collect_supported_syncs() 收集全部 → 过滤仅 light 域（御主约束：只同步转换好的灯具）
+        4. 逐个 async_create_sync（内部自动建 topic + MQTT 通道 + 发布当前状态）
+        """
+        params = params or {}
+        uid = str(params.get("uid") or "").strip()
+        limit = params.get("limit")
+
+        # ── 1. 确保 bemfa 集成已登录 ──
+        bemfa_data = self._hass.data.get("bemfa") or {}
+        if not bemfa_data:
+            if not uid or not re.fullmatch(r"[0-9a-f]{32}", uid):
+                return {
+                    "success": False,
+                    "error": "bemfa 集成未登录，且未提供有效 uid（32 位 hex）",
+                    "hint": "请在 HA 添加 bemfa 集成，或本指令带 uid 参数自动登录",
+                }
+            try:
+                flow = await self._hass.config_entries.flow.async_init(
+                    "bemfa",
+                    context={"source": SOURCE_USER},
+                    data={"uid": uid},
+                )
+                if flow.get("type") != "create_entry":
+                    return {
+                        "success": False,
+                        "error": f"bemfa 登录失败: {flow.get('type')} {flow.get('reason', '')}",
+                    }
+                # 等 bemfa entry setup 完成（async_start 会连接 MQTT）
+                # 注意：不能用 async_block_till_done()——HA 全局任务永不停歇（haier 等），必然超时
+                for _ in range(30):  # 最多等 15s（0.5s 步进）
+                    bemfa_data = self._hass.data.get("bemfa") or {}
+                    if bemfa_data:
+                        break
+                    await asyncio.sleep(0.5)
+                else:
+                    await asyncio.sleep(1)
+                bemfa_data = self._hass.data.get("bemfa") or {}
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.exception("bemfa 登录异常")
+                return {"success": False, "error": f"bemfa 登录异常: {err}"}
+
+        if not bemfa_data:
+            return {"success": False, "error": "bemfa 集成已创建但 service 未就绪"}
+
+        service = next(iter(bemfa_data.values()))["service"]
+
+        # ── 2. 拉取巴法云端已有 topic（幂等去重）──
+        try:
+            all_topics = await service.async_fetch_all_topics()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("拉取巴法 topic 失败")
+            return {"success": False, "error": f"拉取巴法 topic 失败: {err}"}
+
+        # ── 3. 收集全部 syncs → 过滤仅 light 域（御主约束）──
+        syncs = service.collect_supported_syncs()
+        light_syncs = [s for s in syncs if s.entity_id.startswith("light.")]
+        if limit and int(limit) > 0:
+            light_syncs = light_syncs[: int(limit)]
+
+        # ── 4. 逐个创建（建 topic + MQTT 通道 + 发布状态）──
+        created, skipped, failed = [], [], []
+        for sync in light_syncs:
+            if sync.topic in all_topics:
+                skipped.append({
+                    "entity_id": sync.entity_id,
+                    "topic": sync.topic,
+                    "name": all_topics[sync.topic],
+                    "reason": "topic 已存在",
+                })
+                continue
+            try:
+                name = sync.name or sync.entity_id
+                await service.async_create_sync(sync, {"name": name})
+                created.append({
+                    "entity_id": sync.entity_id,
+                    "topic": sync.topic,
+                    "name": name,
+                })
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.exception("同步到巴法失败: %s", sync.entity_id)
+                failed.append({
+                    "entity_id": sync.entity_id,
+                    "topic": sync.topic,
+                    "reason": str(err),
+                })
+
+        return {
+            "success": True,
+            "total_light": len(light_syncs),
+            "created": created,
             "skipped": skipped,
             "failed": failed,
         }
