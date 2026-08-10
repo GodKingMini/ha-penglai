@@ -365,6 +365,13 @@ class PenglaiCommandService:
                 if src:
                     existing_sources.add(src)
 
+        # 已有 switch_as_x config entry（entry 已建但 light 未生成也视为已转换）
+        existing_entry_sources = set()
+        for entry in self._hass.config_entries.async_entries("switch_as_x"):
+            src = (entry.data or {}).get("entity_id")
+            if src:
+                existing_entry_sources.add(src)
+
         candidates = []
         total_switch = 0
         for s in self._hass.states.async_all():
@@ -391,7 +398,7 @@ class PenglaiCommandService:
                 "friendly_name": fn,
                 "matched": is_light,
                 "suffix_hit": suffix_hit,
-                "already_light": eid in existing_sources,
+                "already_light": eid in existing_sources or eid in existing_entry_sources,
                 "state": s.state,
             })
             if len(candidates) >= limit:
@@ -417,10 +424,11 @@ class PenglaiCommandService:
         "过道射灯", "玄关灯", "儿童房灯", "餐厅主灯", "厨房灯带", "厨房射灯",
         "背景灯带", "阳台灯", "凉霸照明",
     ]
-    # 排除词
+    # 排除词（08-10：御主核实「开关机状态」实体无需转换——仅「通断电状态」有效）
     _LIGHT_EXCLUDE_KEYWORDS = [
         "指示灯", "反转", "场景", "空调", "地暖", "新风", "网关",
         "洗衣机", "干衣机", "冰箱", "窗帘", "布帘", "纱帘", "启用", "双控",
+        "开关机",
     ]
 
     async def _async_convert_lights(self, params: dict) -> dict:
@@ -445,15 +453,29 @@ class PenglaiCommandService:
                 if src:
                     existing_sources.add(src)
 
+        # 已有 switch_as_x config entry 的 source_entity（entry 已建但 light 未生成时
+        # 也要防重复转换——否则每次执行都重建一个坏 entry）
+        existing_entry_sources = set()
+        for entry in self._hass.config_entries.async_entries("switch_as_x"):
+            src = (entry.data or {}).get("entity_id")
+            if src:
+                existing_entry_sources.add(src)
+
         targets = []
         if entity_ids:
-            # 精准模式：只处理指定列表（跳过已转的）
+            # 精准模式：只处理指定列表（同样应用排除词过滤 + 已转换去重）
             id_set = {e.strip() for e in entity_ids if isinstance(e, str) and e.strip()}
             for s in self._hass.states.async_all():
                 eid = s.entity_id
                 if eid not in id_set:
                     continue
                 fn = s.attributes.get("friendly_name", "") or eid
+                if any(k in fn for k in self._LIGHT_EXCLUDE_KEYWORDS):
+                    skipped.append({
+                        "entity_id": eid, "friendly_name": fn,
+                        "reason": "名称含排除词（开关机状态等），无需转换",
+                    })
+                    continue
                 targets.append({"entity_id": eid, "friendly_name": fn})
         else:
             # 一键模式：自动发现（后缀 + 名称关键词 + 排除词）
@@ -480,7 +502,7 @@ class PenglaiCommandService:
         created_entries = []  # (t, eid) 已创建 entry，统一等待后反查
         for t in targets:
             eid = t["entity_id"]
-            if eid in existing_sources:
+            if eid in existing_sources or eid in existing_entry_sources:
                 skipped.append({**t, "reason": "已存在 light"})
                 continue
             try:
