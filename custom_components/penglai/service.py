@@ -342,6 +342,33 @@ class PenglaiCommandService:
     # scan_lights：扫描海尔灯 switch 候选清单（v0.4）
     # ─────────────────────────────────────────────
 
+    def _async_switch_as_x_map(self) -> dict[str, str]:
+        """构建 {源 switch entity_id: light entity_id} 映射。
+
+        HA switch_as_x 集成（2021.12~master 共 6 版本）均不暴露 light 实体
+        source_entity 属性——源实体存于 config_entry.options[CONF_ENTITY_ID]。
+        蓬莱不能靠实体属性反查，必须从 config entry options + entity_registry
+        关联得到转换结果（v0.5.6 修复）。
+        """
+        result: dict[str, str] = {}
+        try:
+            reg = entity_registry.async_get(self._hass)
+        except Exception:  # noqa: BLE001
+            return result
+        for entry in self._hass.config_entries.async_entries("switch_as_x"):
+            src = (entry.options or entry.data or {}).get("entity_id")
+            if not src:
+                continue
+            for entity in reg.entities.values():
+                if (
+                    entity.config_entry_id == entry.entry_id
+                    and entity.platform == "switch_as_x"
+                    and entity.entity_id.startswith("light.")
+                ):
+                    result[src] = entity.entity_id
+                    break
+        return result
+
     async def _async_scan_lights(self, params: dict) -> dict:
         """扫描海尔灯相关 switch 实体，上报候选清单（供前端勾选精准转换）。
 
@@ -360,18 +387,15 @@ class PenglaiCommandService:
         keyword = (params or {}).get("keyword", "")
         limit = int((params or {}).get("limit", 200) or 200)
 
-        # 已有 light.source_entity 集合（Switch as X 已转）
-        existing_sources = set()
-        for s in self._hass.states.async_all():
-            if s.entity_id.startswith("light."):
-                src = s.attributes.get("source_entity")
-                if src:
-                    existing_sources.add(src)
+        # 已转换映射：源 switch → light（v0.5.6 修复：HA 不暴露 source_entity 属性，
+        # 改从 switch_as_x config entry options + entity_registry 关联构建）
+        sax_map = self._async_switch_as_x_map()
+        existing_sources = set(sax_map.keys())
 
         # 已有 switch_as_x config entry（entry 已建但 light 未生成也视为已转换）
         existing_entry_sources = set()
         for entry in self._hass.config_entries.async_entries("switch_as_x"):
-            src = (entry.data or {}).get("entity_id")
+            src = (entry.options or entry.data or {}).get("entity_id")
             if src:
                 existing_entry_sources.add(src)
 
@@ -443,24 +467,21 @@ class PenglaiCommandService:
         }
         流程：
         1. 发现海尔面板灯 switch（后缀 + 名称关键词 + 排除词）或按 entity_ids 精准选取
-        2. Switch as X config flow 转 light（防重复：已存在 source_entity 则跳过）
+        2. Switch as X config flow 转 light（防重复：已转换/已建 entry 则跳过）
         """
         # ── 1. 确定目标 switch 列表 ──
         entity_ids = (params or {}).get("entity_ids") or []
 
-        # 已有 light.source_entity 集合（Switch as X 已转）
-        existing_sources = set()
-        for s in self._hass.states.async_all():
-            if s.entity_id.startswith("light."):
-                src = s.attributes.get("source_entity")
-                if src:
-                    existing_sources.add(src)
+        # 已转换映射：源 switch → light（v0.5.6 修复：HA 不暴露 source_entity 属性，
+        # 改从 switch_as_x config entry options + entity_registry 关联构建）
+        sax_map = self._async_switch_as_x_map()
+        existing_sources = set(sax_map.keys())
 
         # 已有 switch_as_x config entry 的 source_entity（entry 已建但 light 未生成时
         # 也要防重复转换——否则每次执行都重建一个坏 entry）
         existing_entry_sources = set()
         for entry in self._hass.config_entries.async_entries("switch_as_x"):
-            src = (entry.data or {}).get("entity_id")
+            src = (entry.options or entry.data or {}).get("entity_id")
             if src:
                 existing_entry_sources.add(src)
 
@@ -551,14 +572,9 @@ class PenglaiCommandService:
                     "Switch as X 转换后等待事件循环排空超时(10s)，按当前状态反查实体"
                 )
             for t, eid in created_entries:
-                found = None
-                for s in self._hass.states.async_all():
-                    if (
-                        s.entity_id.startswith("light.")
-                        and s.attributes.get("source_entity") == eid
-                    ):
-                        found = s.entity_id
-                        break
+                # v0.5.6 修复：不再依赖 light 实体 source_entity 属性（HA 从不暴露），
+                # 直接从 config entry options + entity_registry 关联反查
+                found = sax_map.get(eid)
                 if found:
                     converted.append({**t, "entity_id": found})
                 else:

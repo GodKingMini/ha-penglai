@@ -57,6 +57,9 @@ class PenglaiMqtt:
         self._prefix = entry_data.get(CONF_TOPIC_PREFIX, DEFAULT_TOPIC_PREFIX)
         self._ping_interval = entry_data.get(CONF_PING_INTERVAL, DEFAULT_PING_INTERVAL)
         self._ping_max_lost = entry_data.get(CONF_PING_MAX_LOST, DEFAULT_PING_MAX_LOST)
+        # 审计 H2 修复：默认开启 TLS 证书校验（CERT_REQUIRED）。
+        # 仅当显式设置 tls_skip_verify=True 时才关闭（自签证书内部部署场景）。
+        self._tls_skip_verify = bool(entry_data.get("tls_skip_verify", False))
 
         # topic 计算
         self._topic_cmd = TOPIC_CMD.format(prefix=self._prefix, device_id=self._device_id)
@@ -88,8 +91,14 @@ class PenglaiMqtt:
         )
         if parsed["scheme"] == "wss":
             self._client.ws_set_options(path=parsed.get("path", "/mqtt"))
-            self._client.tls_set(cert_reqs=ssl.CERT_NONE)
-            self._client.tls_insecure_set(True)
+            if self._tls_skip_verify:
+                # 显式关闭校验（自签证书内部部署）；生产公网部署必须保持校验开启
+                self._client.tls_set(cert_reqs=ssl.CERT_NONE)
+                self._client.tls_insecure_set(True)
+            else:
+                # 审计 H2 修复：默认校验服务端证书链（CERT_REQUIRED），
+                # 防止中间人窃听 refresh_token / 注入指令
+                self._client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
         if self._username:
             self._client.username_pw_set(self._username, self._password)
 
