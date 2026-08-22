@@ -10,10 +10,12 @@ v0.2 新增：
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -136,6 +138,16 @@ class PenglaiCommandService:
             _LOGGER.info("haier 集成已从 vendor 安装/更新到 %s", HAIER_INSTALL_DIR)
             # 清除 HA loader 对 custom_components 的缓存，否则 async_init 找不到新装的集成
             self._hass.data.pop("custom_components", None)
+            # 清除 Python 模块缓存（sys.modules）——仅覆盖磁盘文件不够，
+            # importlib.import_module 会命中内存中已加载的旧 HaierConfigFlow 类，
+            # 导致 "Handler HaierConfigFlow doesn't support step import" 反复出现。
+            for mod_name in [
+                m for m in sys.modules if m == "custom_components.haier"
+                or m.startswith("custom_components.haier.")
+            ]:
+                sys.modules.pop(mod_name, None)
+            importlib.invalidate_caches()
+            _LOGGER.info("haier 模块缓存已清理 (sys.modules)")
             return {"installed": True, "source": "vendor"}
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("haier 集成自动安装失败")
