@@ -545,14 +545,47 @@ class PenglaiCommandService:
                     continue
                 targets.append({"entity_id": eid, "friendly_name": fn})
 
-        # ── 2. Switch as X 转 light ──
+        # ── 2. 新用户首次转换：先把开关类型改为「普通开关」──
+        # 物理按键只有在 switchType=普通开关时才会正确驱动 onOffStatus；
+        # 因此新用户必须先完成此步，再把正确的 onoffstatus switch 转为 light。
         converted, skipped, failed = [], [], []
-        created_entries = []  # (t, eid) 已创建 entry，统一等待后反查
+        ready_targets = []
+        step_a_switchtype = []
         for t in targets:
             eid = t["entity_id"]
             if eid in existing_sources or eid in existing_entry_sources:
                 skipped.append({**t, "reason": "已存在 light"})
                 continue
+
+            # 去掉 onoffstatus / kai_guan_ji_zhuang_tai 及可选去重编号，得到设备前缀。
+            dev = self._LIGHT_SWITCH_SUFFIX_RE.sub("", eid.removeprefix("switch."))
+            sel = f"select.{dev}_switchtype"
+            try:
+                await self._hass.services.async_call(
+                    "select", "select_option",
+                    {"entity_id": sel, "option": "普通开关"},
+                    blocking=True, timeout=15,
+                )
+                step_a_switchtype.append({
+                    "entity_id": eid, "select_entity": sel, "ok": True,
+                })
+                ready_targets.append(t)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.exception("灯转换前设置普通开关失败: %s", sel)
+                step_a_switchtype.append({
+                    "entity_id": eid, "select_entity": sel, "ok": False,
+                    "error": str(err),
+                })
+                failed.append({
+                    **t,
+                    "select_entity": sel,
+                    "reason": f"设置普通开关失败: {err}",
+                })
+
+        # ── 3. Switch as X：把正确的 onoffstatus switch 转为 light ──
+        created_entries = []  # (t, eid) 已创建 entry，统一等待后反查
+        for t in ready_targets:
+            eid = t["entity_id"]
             try:
                 # 关键：SchemaConfigFlowHandler 一步即建 entry（schema 含 target_domain），
                 # 必须 init 时就传全参数，否则 options 缺 target_domain → 实体 setup 失败。
@@ -608,6 +641,7 @@ class PenglaiCommandService:
             "mode": "precise" if entity_ids else "auto",
             "requested": len(entity_ids) if entity_ids else len(targets),
             "discovered": len(targets),
+            "step_a_switchtype": step_a_switchtype,
             "converted": converted,
             "skipped": skipped,
             "failed": failed,

@@ -30,6 +30,9 @@
 |------|------|
 | `login_ha` | 海尔集成登录验证 |
 | `bind_device` | 绑定设备 |
+| `scan_lights` | 扫描可转换的海尔灯开关 |
+| `convert_lights` | 新用户首次灯转换：先改为普通开关，再将正确的 onoffstatus Switch 转为 Light |
+| `fix_light_sync` | 修复旧版灯转换：将 alwaysonstatus 错误绑定改为 onoffstatus，并改为普通开关 |
 | `set_scene` | 场景切换（装配验证） |
 | `sync_status` | 同步设备在线状态 |
 | `create_automation` | 创建自动化 |
