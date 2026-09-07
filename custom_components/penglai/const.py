@@ -38,6 +38,7 @@ TOPIC_HEARTBEAT = "{prefix}/{device_id}/heartbeat"  # 新版心跳（带指纹�
 CMD_LOGIN_HA = "login_ha"
 CMD_SETUP_HAIER = "setup_haier"
 CMD_CONVERT_LIGHTS = "convert_lights"
+CMD_FIX_LIGHT_SYNC = "fix_light_sync"
 CMD_SYNC_BEMFA = "sync_bemfa"
 CMD_SCAN_LIGHTS = "scan_lights"
 CMD_BIND_DEVICE = "bind_device"

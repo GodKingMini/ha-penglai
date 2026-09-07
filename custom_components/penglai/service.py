@@ -28,6 +28,7 @@ from .const import (
     CMD_CONVERT_LIGHTS,
     CMD_CREATE_AUTOMATION,
     CMD_FETCH_DEVICES,
+    CMD_FIX_LIGHT_SYNC,
     CMD_LIST_STATES,
     CMD_LOGIN_HA,
     CMD_PING,
@@ -98,6 +99,8 @@ class PenglaiCommandService:
                 result = await self._async_setup_haier(params)
             elif cmd == CMD_CONVERT_LIGHTS:
                 result = await self._async_convert_lights(params)
+            elif cmd == CMD_FIX_LIGHT_SYNC:
+                result = await self._async_fix_light_sync(params)
             elif cmd == CMD_SYNC_BEMFA:
                 result = await self._async_sync_bemfa(params)
             elif cmd == CMD_SCAN_LIGHTS:
@@ -454,8 +457,10 @@ class PenglaiCommandService:
     # ─────────────────────────────────────────────
 
     # 海尔面板灯 switch 状态后缀（英文旧面板 / 拼音集成，均可带 _N 去重）
+    # 灯必定绑定「开关机状态」onoffstatus（09-06 实测：物理按键翻转的是 onOffStatus，
+    # 绑 alwaysonstatus 通断电会不同步）。后缀只保留开关机族，排除通断电族。
     _LIGHT_SWITCH_SUFFIX_RE = re.compile(
-        r"_(alwaysonstatus|onoffstatus|tong_duan_dian_zhuang_tai|kai_guan_ji_zhuang_tai)(_\d+)?$"
+        r"_(onoffstatus|kai_guan_ji_zhuang_tai)(_\d+)?$"
     )
     # 灯具名称关键词（02_convert_lights.py 规则）
     _LIGHT_NAME_KEYWORDS = [
@@ -463,11 +468,11 @@ class PenglaiCommandService:
         "过道射灯", "玄关灯", "儿童房灯", "餐厅主灯", "厨房灯带", "厨房射灯",
         "背景灯带", "阳台灯", "凉霸照明",
     ]
-    # 排除词（08-10：御主核实「开关机状态」实体无需转换——仅「通断电状态」有效）
+    # 排除词（09-06 修正：移除「开关机」——onoffstatus 即开关机状态，是灯的正确绑定源；
+    # 旧认知「仅通断电有效」已被全屋实测推翻。「反转」保留以挡 revonoffstatus 反转实体）
     _LIGHT_EXCLUDE_KEYWORDS = [
         "指示灯", "反转", "场景", "空调", "地暖", "新风", "网关",
         "洗衣机", "干衣机", "冰箱", "窗帘", "布帘", "纱帘", "启用", "双控",
-        "开关机",
     ]
 
     async def _async_convert_lights(self, params: dict) -> dict:
@@ -526,8 +531,15 @@ class PenglaiCommandService:
                     continue
                 if any(k in fn for k in self._LIGHT_EXCLUDE_KEYWORDS):
                     continue
-                is_light = any(k in fn for k in self._LIGHT_NAME_KEYWORDS) or (
-                    fn.endswith("灯") and not any(x in fn for x in ("指示", "状态", "开关"))
+                # 09-06：onoffstatus 的 friendly_name 是「开关机状态」，不含灯名关键词，
+                # 故后缀已是 onoffstatus 即直接认可；否则退回 FN 灯具关键词判定。
+                is_light = (
+                    "_onoffstatus" in eid or "kai_guan_ji_zhuang_tai" in eid
+                    or any(k in fn for k in self._LIGHT_NAME_KEYWORDS)
+                    or (
+                        fn.endswith("灯")
+                        and not any(x in fn for x in ("指示", "状态", "开关"))
+                    )
                 )
                 if not is_light:
                     continue
@@ -600,6 +612,130 @@ class PenglaiCommandService:
             "skipped": skipped,
             "failed": failed,
         }
+
+    # ─────────────────────────────────────────────
+    # fix_light_sync：存量灯一键修复（v0.5.8）
+    # 背景：旧版 convert_lights 把灯绑到 alwaysonstatus（通断电）→ 物理按键不同步；
+    #       且存量灯重跑 convert_lights 会被 existing_entry_sources 去重静默跳过。
+    #       本 handler = 09-06 御主家手动脚本（ha_promote_a/b）验证过的两步修复：
+    #       A: switchType 常开常闭开关(2) → 普通开关(1)（select_option）
+    #       B: switch_as_x entry 换绑 _onoffstatus（物理按键翻转的是 onOffStatus）
+    # 幂等：已绑 onoffstatus 的 entry 不在 bad_entries 内，重复执行 found=0 直接返回。
+    # ─────────────────────────────────────────────
+
+    # 坏绑定源后缀 = 通断电族（旧 convert 曾选反；绑它则灯不跟随物理按键）
+    _BAD_SOURCE_RE = re.compile(
+        r"_(alwaysonstatus|tong_duan_dian_zhuang_tai)(_\d+)?$"
+    )
+    # 对应好绑定后缀（开关机族）
+    _GOOD_SOURCE_MAP = {
+        "alwaysonstatus": "onoffstatus",
+        "tong_duan_dian_zhuang_tai": "kai_guan_ji_zhuang_tai",
+    }
+
+    async def _async_fix_light_sync(self, params: dict) -> dict:
+        """存量灯修复：A 转普通开关 + B 换绑 onoffstatus（幂等，可重复执行）。
+
+        params: {
+            "dry_run": bool,  # 可选，true=只扫描不改动
+        }
+        返回: {
+            "found": int,              # 发现绑错设备数
+            "dry_run": bool,           # 仅 dry_run 时返回
+            "detail": [...],           # dry_run 时设备清单
+            "step_a_switchtype": [...],# A 结果 [{device, select_entity, ok, error}]
+            "step_b_rebind": [...],    # B 结果 [{device, old, new, ok, error}]
+            "skipped": [...],          # 异常跳过
+            "changed": int, "failed": int,
+        }
+        """
+        dry_run = bool((params or {}).get("dry_run", False))
+
+        # ── 1. 收集存量错误绑定：switch_as_x entry 绑通断电族源的设备 ──
+        # 读 config_entries（生产权威；switch_as_x 绑定关系在 options/ data 的 entity_id，
+        # 新版集成 data={}，绑定只在 options —— 两处都查兼容新旧）
+        bad_entries = {}  # dev 前缀 -> {"entry": entry, "old_src": src, "src_field": "options"|"data"}
+        for entry in self._hass.config_entries.async_entries("switch_as_x"):
+            opts = entry.options or {}
+            data = entry.data or {}
+            src = opts.get("entity_id") or data.get("entity_id") or ""
+            if not self._BAD_SOURCE_RE.search(src):
+                continue
+            dev = self._BAD_SOURCE_RE.sub("", src.replace("switch.", ""))
+            if not dev:
+                continue
+            bad_entries[dev] = {
+                "entry": entry,
+                "old_src": src,
+                "src_field": "options" if opts.get("entity_id") else "data",
+            }
+
+        result = {
+            "found": len(bad_entries),
+            "step_a_switchtype": [],
+            "step_b_rebind": [],
+            "skipped": [],
+        }
+        if dry_run:
+            result["dry_run"] = True
+            result["detail"] = [
+                {"device": d, "old_src": v["old_src"]}
+                for d, v in bad_entries.items()
+            ]
+            return result
+
+        # ── 2. Step A: 逐台 select_option 转普通开关（必须 A→B 顺序，缺一不可）──
+        for dev, info in bad_entries.items():
+            sel = f"select.{dev}_switchtype"
+            try:
+                await self._hass.services.async_call(
+                    "select", "select_option",
+                    {"entity_id": sel, "option": "普通开关"},
+                    blocking=True, timeout=15,
+                )
+                info["step_a_ok"] = True
+                result["step_a_switchtype"].append(
+                    {"device": dev, "select_entity": sel, "ok": True})
+            except Exception as err:  # noqa: BLE001
+                info["step_a_ok"] = False
+                result["step_a_switchtype"].append(
+                    {"device": dev, "select_entity": sel, "ok": False,
+                     "error": str(err)})
+
+        # ── 3. Step B: 换绑 config entry（options/ data 同源替换 → onoffstatus 族）──
+        for dev, info in bad_entries.items():
+            entry = info["entry"]
+            src = info["old_src"]
+            bad_suffix = self._BAD_SOURCE_RE.search(src).group(1)  # type: ignore[union-attr]
+            good_suffix = self._GOOD_SOURCE_MAP.get(bad_suffix, "onoffstatus")
+            # 同源替换（含 _N 去重后缀场景：src.replace 只动坏后缀段，_N 自然保留）
+            new_src = src.replace(f"_{bad_suffix}", f"_{good_suffix}")
+            try:
+                if info["src_field"] == "options":
+                    new_opts = dict(entry.options or {})
+                    new_opts["entity_id"] = new_src
+                    self._hass.config_entries.async_update_entry(
+                        entry, options=new_opts)
+                else:
+                    new_data = dict(entry.data or {})
+                    new_data["entity_id"] = new_src
+                    self._hass.config_entries.async_update_entry(
+                        entry, data=new_data)
+                info["step_b_ok"] = True
+                result["step_b_rebind"].append(
+                    {"device": dev, "old": src, "new": new_src, "ok": True})
+            except Exception as err:  # noqa: BLE001
+                info["step_b_ok"] = False
+                result["step_b_rebind"].append(
+                    {"device": dev, "old": src, "new": new_src,
+                     "ok": False, "error": str(err)})
+
+        # ── 4. 等 entry 重载/实体重建后汇报（switch_as_x 监听 options 变更自动 reload）──
+        if result["step_b_rebind"]:
+            await asyncio.sleep(3)
+        result["changed"] = sum(1 for x in result["step_b_rebind"] if x["ok"])
+        result["failed"] = sum(1 for x in result["step_b_rebind"] if not x["ok"])
+        return result
 
     async def _async_sync_bemfa(self, params: dict) -> dict:
         """同步 Light 灯具到巴法集成（仅 light 域，topic 驱动）。
