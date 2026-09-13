@@ -667,6 +667,29 @@ class PenglaiCommandService:
         "tong_duan_dian_zhuang_tai": "kai_guan_ji_zhuang_tai",
     }
 
+    def _resolve_switchtype_select(self, switch_entity_id: str) -> str | None:
+        """按「设备」定位同一设备的 `*_switchtype` select 实体（比按名字推导可靠）。
+
+        名字推导 `select.{前缀}_switchtype` 有两处坑：
+        1) `_N` 去重号按「实体创建顺序」分配，switch 的 `_N` 与 select 的 `_N` 不一一对应；
+        2) 存在多个命名族（`<设备id>_onoffstatus` 与 `<灯名>_tong_duan_dian_zhuang_tai`）。
+        走 实体注册表 → device_id → 该设备下的 select 实体，两种命名族都成立。
+        """
+        try:
+            from homeassistant.helpers import entity_registry as er
+
+            reg = er.async_get(self._hass)
+            src_entry = reg.async_get(switch_entity_id)
+            device_id = getattr(src_entry, "device_id", None)
+            if not device_id:
+                return None
+            for e in er.async_entries_for_device(reg, device_id):
+                if e.entity_id.startswith("select.") and e.entity_id.endswith("_switchtype"):
+                    return e.entity_id
+        except Exception:  # noqa: BLE001 — 注册表不可用时退回名字推导，不阻断修复
+            return None
+        return None
+
     async def _async_fix_light_sync(self, params: dict) -> dict:
         """存量灯修复：A 转普通开关 + B 换绑 onoffstatus（幂等，可重复执行）。
 
@@ -688,21 +711,32 @@ class PenglaiCommandService:
         # ── 1. 收集存量错误绑定：switch_as_x entry 绑通断电族源的设备 ──
         # 读 config_entries（生产权威；switch_as_x 绑定关系在 options/ data 的 entity_id，
         # 新版集成 data={}，绑定只在 options —— 两处都查兼容新旧）
-        bad_entries = {}  # dev 前缀 -> {"entry": entry, "old_src": src, "src_field": "options"|"data"}
+        # 2026-09-13 修复（v0.5.10）：原实现用「剥掉 _N 去重号后的前缀」做 dict 键，
+        # 同名前缀（deng_dai / deng_dai_2 / deng_dai_3 …）会互相覆盖 → found 由 23 缩到 13，
+        # 10 个灯被静默漏修（实测设备45 回执 #84：23 个候选只修 13 个）。
+        # 改用 list（不去重），且前缀保留 _N 去重号；switchType select 走设备注册表精确定位。
+        bad_entries: list[dict] = []
         for entry in self._hass.config_entries.async_entries("switch_as_x"):
             opts = entry.options or {}
             data = entry.data or {}
             src = opts.get("entity_id") or data.get("entity_id") or ""
-            if not self._BAD_SOURCE_RE.search(src):
+            ent_id = src[7:] if src.startswith("switch.") else src
+            m = self._BAD_SOURCE_RE.search(ent_id)
+            if not m:
                 continue
-            dev = self._BAD_SOURCE_RE.sub("", src.replace("switch.", ""))
+            # 前缀 = 去掉函数后缀，但**保留** _N 去重号（_N 属于设备标识，丢了会打错设备）
+            # 注意：切片下标必须与 search 用同一个字符串（曾在含 switch. 前缀的串上取下标、
+            # 在去前缀串上切片 → 前缀被截掉 7 个字符，单测当场抓到）
+            dev = ent_id[: m.start()] + (m.group(2) or "")
             if not dev:
                 continue
-            bad_entries[dev] = {
+            bad_entries.append({
+                "dev": dev,
                 "entry": entry,
                 "old_src": src,
                 "src_field": "options" if opts.get("entity_id") else "data",
-            }
+                "sel": self._resolve_switchtype_select(src) or f"select.{dev}_switchtype",
+            })
 
         result = {
             "found": len(bad_entries),
@@ -713,14 +747,15 @@ class PenglaiCommandService:
         if dry_run:
             result["dry_run"] = True
             result["detail"] = [
-                {"device": d, "old_src": v["old_src"]}
-                for d, v in bad_entries.items()
+                {"device": v["dev"], "old_src": v["old_src"], "select_entity": v["sel"]}
+                for v in bad_entries
             ]
             return result
 
         # ── 2. Step A: 逐台 select_option 转普通开关（必须 A→B 顺序，缺一不可）──
-        for dev, info in bad_entries.items():
-            sel = f"select.{dev}_switchtype"
+        for info in bad_entries:
+            dev = info["dev"]
+            sel = info["sel"]
             try:
                 await self._hass.services.async_call(
                     "select", "select_option",
@@ -737,7 +772,8 @@ class PenglaiCommandService:
                      "error": str(err)})
 
         # ── 3. Step B: 换绑 config entry（options/ data 同源替换 → onoffstatus 族）──
-        for dev, info in bad_entries.items():
+        for info in bad_entries:
+            dev = info["dev"]
             entry = info["entry"]
             src = info["old_src"]
             bad_suffix = self._BAD_SOURCE_RE.search(src).group(1)  # type: ignore[union-attr]
