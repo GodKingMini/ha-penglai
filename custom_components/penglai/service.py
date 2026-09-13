@@ -557,14 +557,19 @@ class PenglaiCommandService:
                 skipped.append({**t, "reason": "已存在 light"})
                 continue
 
-            # 去掉 onoffstatus / kai_guan_ji_zhuang_tai 及可选去重编号，得到设备前缀。
-            dev = self._LIGHT_SWITCH_SUFFIX_RE.sub("", eid.removeprefix("switch."))
-            sel = f"select.{dev}_switchtype"
+            # 去掉 onoffstatus / kai_guan_ji_zhuang_tai 得到设备前缀，但**保留 _N 去重号**
+            # （2026-09-13 修复：原先 sub("") 把 _N 一起剥掉 → 同名前缀的灯打到别的设备）
+            ent_id2 = eid.removeprefix("switch.")
+            m2 = self._LIGHT_SWITCH_SUFFIX_RE.search(ent_id2)
+            dev = (ent_id2[: m2.start()] + (m2.group(2) or "")) if m2 else ent_id2
+            sel = self._resolve_switchtype_select(eid) or f"select.{dev}_switchtype"
             try:
+                # 2026-09-13 修复：HA 的 async_call() **没有 timeout 参数**
+                # （v0.5.8~v0.5.10 此步必抛 TypeError → 普通开关从未真正被改过）
                 await self._hass.services.async_call(
                     "select", "select_option",
                     {"entity_id": sel, "option": "普通开关"},
-                    blocking=True, timeout=15,
+                    blocking=True,
                 )
                 step_a_switchtype.append({
                     "entity_id": eid, "select_entity": sel, "ok": True,
@@ -661,6 +666,10 @@ class PenglaiCommandService:
     _BAD_SOURCE_RE = re.compile(
         r"_(alwaysonstatus|tong_duan_dian_zhuang_tai)(_\d+)?$"
     )
+    # 正确绑定源后缀 = 开关机族（v0.5.11：Step A 也要覆盖这批，见 _async_fix_light_sync）
+    _GOOD_SOURCE_RE = re.compile(
+        r"_(onoffstatus|kai_guan_ji_zhuang_tai)(_\d+)?$"
+    )
     # 对应好绑定后缀（开关机族）
     _GOOD_SOURCE_MAP = {
         "alwaysonstatus": "onoffstatus",
@@ -697,11 +706,13 @@ class PenglaiCommandService:
             "dry_run": bool,  # 可选，true=只扫描不改动
         }
         返回: {
-            "found": int,              # 发现绑错设备数
+            "found": int,              # 需换绑（Step B）的设备数
+            "found_type": int,         # 需改开关类型（Step A）的设备数 = 全部 switch_as_x 灯
             "dry_run": bool,           # 仅 dry_run 时返回
-            "detail": [...],           # dry_run 时设备清单
-            "step_a_switchtype": [...],# A 结果 [{device, select_entity, ok, error}]
+            "detail": [...],           # dry_run 时设备清单（含 need_rebind / select_source）
+            "step_a_switchtype": [...],# A 结果 [{device, select_entity, select_source, ok, error}]
             "step_b_rebind": [...],    # B 结果 [{device, old, new, ok, error}]
+            "reloaded": int,           # 已显式 reload 的 entry 数（v0.5.11）
             "skipped": [...],          # 异常跳过
             "changed": int, "failed": int,
         }
@@ -715,13 +726,18 @@ class PenglaiCommandService:
         # 同名前缀（deng_dai / deng_dai_2 / deng_dai_3 …）会互相覆盖 → found 由 23 缩到 13，
         # 10 个灯被静默漏修（实测设备45 回执 #84：23 个候选只修 13 个）。
         # 改用 list（不去重），且前缀保留 _N 去重号；switchType select 走设备注册表精确定位。
-        bad_entries: list[dict] = []
+        bad_entries: list[dict] = []   # 需换绑（Step B）
+        type_entries: list[dict] = []  # 需改开关类型（Step A）：坏源 + 已绑对的都算
+        # v0.5.11 新增：Step A 改为覆盖**所有** switch_as_x 灯，而非只覆盖「绑错源」那批。
+        # 原因：Step B 把源改对后，重跑修复时「坏绑定集合」为空 → Step A 永远不会被执行，
+        # 开关类型（普通开关）就永远补不上（实测：首批 22 台源已绑对，但开关类型一台没改）。
         for entry in self._hass.config_entries.async_entries("switch_as_x"):
             opts = entry.options or {}
             data = entry.data or {}
             src = opts.get("entity_id") or data.get("entity_id") or ""
             ent_id = src[7:] if src.startswith("switch.") else src
-            m = self._BAD_SOURCE_RE.search(ent_id)
+            is_bad = bool(self._BAD_SOURCE_RE.search(ent_id))
+            m = self._BAD_SOURCE_RE.search(ent_id) or self._GOOD_SOURCE_RE.search(ent_id)
             if not m:
                 continue
             # 前缀 = 去掉函数后缀，但**保留** _N 去重号（_N 属于设备标识，丢了会打错设备）
@@ -730,16 +746,23 @@ class PenglaiCommandService:
             dev = ent_id[: m.start()] + (m.group(2) or "")
             if not dev:
                 continue
-            bad_entries.append({
+            sel_by_registry = self._resolve_switchtype_select(src)
+            info = {
                 "dev": dev,
                 "entry": entry,
                 "old_src": src,
                 "src_field": "options" if opts.get("entity_id") else "data",
-                "sel": self._resolve_switchtype_select(src) or f"select.{dev}_switchtype",
-            })
+                "sel": sel_by_registry or f"select.{dev}_switchtype",
+                "sel_src": "registry" if sel_by_registry else "fallback",
+                "need_rebind": is_bad,
+            }
+            type_entries.append(info)
+            if is_bad:
+                bad_entries.append(info)
 
         result = {
-            "found": len(bad_entries),
+            "found": len(bad_entries),        # 需换绑数
+            "found_type": len(type_entries),  # 需改开关类型数（Step A 覆盖范围）
             "step_a_switchtype": [],
             "step_b_rebind": [],
             "skipped": [],
@@ -747,28 +770,35 @@ class PenglaiCommandService:
         if dry_run:
             result["dry_run"] = True
             result["detail"] = [
-                {"device": v["dev"], "old_src": v["old_src"], "select_entity": v["sel"]}
-                for v in bad_entries
+                {"device": v["dev"], "old_src": v["old_src"],
+                 "select_entity": v["sel"], "select_source": v["sel_src"],
+                 "need_rebind": v["need_rebind"]}
+                for v in type_entries
             ]
             return result
 
         # ── 2. Step A: 逐台 select_option 转普通开关（必须 A→B 顺序，缺一不可）──
-        for info in bad_entries:
+        for info in type_entries:
             dev = info["dev"]
             sel = info["sel"]
             try:
+                # ⚠️ 2026-09-13 修复（v0.5.11）：HA 的 ServiceRegistry.async_call()
+                # **没有 timeout 参数** —— 原先传 timeout=15 会抛 TypeError，
+                # 导致本步 22/22 全失败（线上回执原文：unexpected keyword argument 'timeout'）。
                 await self._hass.services.async_call(
                     "select", "select_option",
                     {"entity_id": sel, "option": "普通开关"},
-                    blocking=True, timeout=15,
+                    blocking=True,
                 )
                 info["step_a_ok"] = True
                 result["step_a_switchtype"].append(
-                    {"device": dev, "select_entity": sel, "ok": True})
+                    {"device": dev, "select_entity": sel,
+                     "select_source": info["sel_src"], "ok": True})
             except Exception as err:  # noqa: BLE001
                 info["step_a_ok"] = False
                 result["step_a_switchtype"].append(
-                    {"device": dev, "select_entity": sel, "ok": False,
+                    {"device": dev, "select_entity": sel,
+                     "select_source": info["sel_src"], "ok": False,
                      "error": str(err)})
 
         # ── 3. Step B: 换绑 config entry（options/ data 同源替换 → onoffstatus 族）──
@@ -800,9 +830,30 @@ class PenglaiCommandService:
                     {"device": dev, "old": src, "new": new_src,
                      "ok": False, "error": str(err)})
 
-        # ── 4. 等 entry 重载/实体重建后汇报（switch_as_x 监听 options 变更自动 reload）──
-        if result["step_b_rebind"]:
-            await asyncio.sleep(3)
+        # ── 4. 显式重载被改的 entry ───────────────────────────────────
+        # ⚠️ 2026-09-13 实测（v0.5.11 修正）：`async_update_entry(options=...)` **不会**
+        # 让 switch_as_x 重新加载。线上症状：config_entries 里源已改对，但灯实体仍包着旧源，
+        # 按物理按键灯不动（只有开关机状态动）。必须显式 async_reload。
+        # 重载**全部**本次涉及的 switch_as_x entry（不只换绑过的那些）：
+        # ① 刚换绑的必须重载才会真正换源；
+        # ② 历史遗留「config_entries 里源已改对、但当时没重载」的灯，也只能靠重载生效
+        #    （否则要用户手动重启 HA —— 设备47 实测就是这种状态）。
+        reloaded = 0
+        seen_entries: set[str] = set()
+        for info in type_entries:
+            eid_entry = info["entry"].entry_id
+            if eid_entry in seen_entries:
+                continue
+            seen_entries.add(eid_entry)
+            try:
+                await self._hass.config_entries.async_reload(eid_entry)
+                reloaded += 1
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "重载 switch_as_x entry 失败 %s: %s", eid_entry, err)
+        result["reloaded"] = reloaded
+        if reloaded:
+            await asyncio.sleep(2)
         result["changed"] = sum(1 for x in result["step_b_rebind"] if x["ok"])
         result["failed"] = sum(1 for x in result["step_b_rebind"] if not x["ok"])
         return result
