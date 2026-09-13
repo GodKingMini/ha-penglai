@@ -55,6 +55,25 @@ CMD_HEARTBEAT = "heartbeat"
 RESULT_OK = "success"
 RESULT_FAIL = "failed"
 
+# ─── 集成版本（2026-09-13 A2）──────────────────────────────
+# 单一事实源 = manifest.json；心跳会上报该版本，平台据此显示"集成版本/可升级"。
+import json as _json
+import os as _os
+
+
+def _read_version() -> str:
+    try:
+        with open(_os.path.join(_os.path.dirname(__file__), "manifest.json"), encoding="utf-8") as _f:
+            return str(_json.load(_f).get("version") or "0.0.0")
+    except Exception:  # noqa: BLE001
+        return "0.0.0"
+
+
+VERSION = _read_version()
+
+# 升级自身（B1：前端一键升级集成）
+CMD_UPGRADE_INTEGRATION = "upgrade_integration"
+
 # 消息超时（等待 result 回报）
 CMD_TIMEOUT = 30
 

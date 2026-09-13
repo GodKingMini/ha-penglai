@@ -24,6 +24,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import device_registry, entity_registry
 
 from .const import (
+    CMD_UPGRADE_INTEGRATION,
     CMD_BIND_DEVICE,
     CMD_CONVERT_LIGHTS,
     CMD_CREATE_AUTOMATION,
@@ -105,6 +106,8 @@ class PenglaiCommandService:
                 result = await self._async_sync_bemfa(params)
             elif cmd == CMD_SCAN_LIGHTS:
                 result = await self._async_scan_lights(params)
+            elif cmd == CMD_UPGRADE_INTEGRATION:
+                result = await self._async_upgrade_integration(params)
             elif cmd == CMD_BIND_DEVICE:
                 result = await self._async_bind_device(params)
             elif cmd in CMD_TO_HA_SERVICE:
@@ -383,6 +386,84 @@ class PenglaiCommandService:
                     result[src] = entity.entity_id
                     break
         return result
+
+    async def _async_upgrade_integration(self, params: dict) -> dict:
+        """从 GitHub Release 下载并安装新版蓬莱集成（B1，2026-09-13）。
+
+        params:
+          repo    : 仓库，默认 GodKingMini/ha-penglai
+          version : "latest"（默认）或指定标签如 v0.5.12
+          restart : true → 安装完成后自动重启 HA 使新代码生效（默认不重启）
+        返回: {old_version, new_version, tag, need_restart, [restart]}
+        """
+        import io
+        import os
+        import urllib.request
+        import zipfile
+
+        from .const import VERSION as _CUR
+
+        repo = (params.get("repo") or "GodKingMini/ha-penglai").strip()
+        ver = (params.get("version") or "latest").strip()
+        api = f"https://api.github.com/repos/{repo}/releases/{ver}"
+        _hdrs = {
+            "User-Agent": "penglai-integration-updater",
+            "Accept": "application/vnd.github+json",
+        }
+
+        def _get(url: str) -> bytes:
+            req = urllib.request.Request(url, headers=_hdrs)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return resp.read()
+
+        try:
+            meta = json.loads((await self._hass.async_add_executor_job(_get, api)).decode("utf-8"))
+        except Exception as err:  # noqa: BLE001
+            return {"success": False, "error": f"获取 Release 失败: {err}"}
+
+        tag = meta.get("tag_name") or ver
+        asset = next((a for a in meta.get("assets", []) if a.get("name") == "penglai.zip"), None)
+        if asset is None:
+            return {"success": False, "error": f"Release {tag} 未附带 penglai.zip"}
+        try:
+            blob = await self._hass.async_add_executor_job(_get, asset["browser_download_url"])
+        except Exception as err:  # noqa: BLE001
+            return {"success": False, "error": f"下载 penglai.zip 失败: {err}"}
+
+        dest = os.path.join(self._hass.config.path("custom_components"), "penglai")
+        try:
+            with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+                bad = [n for n in zf.namelist()
+                       if n.startswith("/") or ".." in n.replace("\\", "/").split("/")]
+                if bad:
+                    return {"success": False, "error": f"包内含非法路径: {bad[:3]}"}
+                zf.extractall(dest)
+        except Exception as err:  # noqa: BLE001
+            return {"success": False, "error": f"解压失败: {err}"}
+
+        new_ver = "unknown"
+        try:
+            with open(os.path.join(dest, "manifest.json"), encoding="utf-8") as fh:
+                new_ver = str(json.load(fh).get("version") or "unknown")
+        except Exception:  # noqa: BLE001
+            pass
+
+        out = {
+            "old_version": _CUR,
+            "new_version": new_ver,
+            "tag": tag,
+            "size": len(blob),
+            "need_restart": new_ver != _CUR,
+        }
+        if params.get("restart") and out["need_restart"]:
+            try:
+                await self._hass.services.async_call(
+                    "homeassistant", "restart", {}, blocking=False
+                )
+                out["restart"] = True
+            except Exception as err:  # noqa: BLE001
+                out["restart_error"] = str(err)
+        return out
 
     async def _async_scan_lights(self, params: dict) -> dict:
         """扫描海尔灯相关 switch 实体，上报候选清单（供前端勾选精准转换）。

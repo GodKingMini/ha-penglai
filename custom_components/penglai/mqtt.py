@@ -25,6 +25,7 @@ from .const import (
     CONF_USERNAME,
     CMD_HEARTBEAT,
     CMD_PING,
+    VERSION as _PL_VERSION,
     DEFAULT_PING_INTERVAL,
     DEFAULT_PING_MAX_LOST,
     DEFAULT_TOPIC_PREFIX,
@@ -162,7 +163,7 @@ class PenglaiMqtt:
             # 订阅指令 topic（借鉴 bemfa: 订阅自身 topic）
             client.subscribe(self._topic_cmd, qos=1)
             # 上线发布心跳（带指纹，后端做指纹校验）
-            self.publish(self._topic_heartbeat, json.dumps({"type": CMD_HEARTBEAT, "device_id": self._device_id, "fingerprint": self._fingerprint(), "ts": _now()}))
+            self.publish(self._topic_heartbeat, json.dumps({"type": CMD_HEARTBEAT, "device_id": self._device_id, "fingerprint": self._fingerprint(), "version": _PL_VERSION, "ts": _now()}))
         else:
             _LOGGER.error("Penglai MQTT 连接被拒 rc=%s", reason_code)
 
@@ -188,7 +189,7 @@ class PenglaiMqtt:
         while True:
             await asyncio.sleep(INTERVAL_PING_SEND)
             if self._connected:
-                self.publish(self._topic_heartbeat, json.dumps({"type": CMD_HEARTBEAT, "device_id": self._device_id, "fingerprint": self._fingerprint(), "ts": _now()}))
+                self.publish(self._topic_heartbeat, json.dumps({"type": CMD_HEARTBEAT, "device_id": self._device_id, "fingerprint": self._fingerprint(), "version": _PL_VERSION, "ts": _now()}))
 
     async def _ping_check_loop(self) -> None:
         """每 20s 检查心跳超时，连续 3 次丢失则重连。"""
